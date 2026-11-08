@@ -1,0 +1,643 @@
+diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
+index abfe53e..fa10d15 100644
+--- a/host/CMakeLists.txt
++++ b/host/CMakeLists.txt
+@@ -116,6 +116,7 @@ if (CONKER_RT64)
+         # On macOS it renders with Metal into the window's CAMetalLayer.
+         set(RT64_SDL_WINDOW_VULKAN ON CACHE BOOL "" FORCE)
+         add_compile_definitions(PLUME_SDL_VULKAN_ENABLED RT64_SDL_WINDOW_VULKAN)
++        # (PS5: no file dialogs; RT64's CMake builds a stub nfd that always cancels.)
+         # The file dialogs (Load ROM, mods) ask the desktop for its own through
+         # xdg-desktop-portal (D-Bus) instead of opening a GTK one in the game: GTK
+         # crashed building its dialog, which the launcher opens from its own thread,
+@@ -128,6 +129,11 @@ if (CONKER_RT64)
+     # remappable input (recompinput). tools/RecompFrontend is an untracked checkout.
+     if (WIN32)
+         set(sdl2_SOURCE_DIR "${RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3")
++    elseif (PS5)
++        # SDL2 from the PacBrew sysroot (cmake/ps5-toolchain.cmake). ps5/link-title.sh links each -l name as its
++        # archive there.
++        set(SDL2_INCLUDE_DIRS "$ENV{PACBREW}/include/SDL2")
++        set(SDL2_LIBRARIES SDL2)
+     else()
+         # The system SDL2; RecompFrontend takes its headers from SDL2_INCLUDE_DIRS.
+         find_package(SDL2 REQUIRED)
+@@ -201,13 +207,22 @@ if (CONKER_RT64)
+     endif()
+ endif()
+ 
++if (PS5)
++    # The PS5 port's start-up (log, crash reports, SDL video driver): ps5/ next to src-upstream.
++    target_sources(ConkerRecomp PRIVATE "${PS5_PORT_DIR}/ps5_platform.cpp")
++    target_include_directories(ConkerRecomp PRIVATE "${PS5_PORT_DIR}")
++    # FreeType from the PacBrew sysroot (RmlUi's fonts).
++    find_package(Freetype REQUIRED)
++    target_link_libraries(ConkerRecomp PRIVATE ${FREETYPE_LIBRARIES})
++endif()
++
+ if (NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+     # The recompiled audio microcode's vector unit uses SSSE3 and SSE4.1 intrinsics,
+     # which GCC and Clang only allow when targeting them (MSVC always does).
+     target_compile_options(ConkerRecomp PRIVATE -msse4.1)
+ endif()
+ 
+-if (UNIX)
++if (UNIX AND NOT PS5)
+     # Exported symbols let the crash handler's backtrace name recompiled functions.
+     target_link_options(ConkerRecomp PRIVATE -rdynamic)
+ elseif (WIN32)
+diff --git a/host/src/conker.hpp b/host/src/conker.hpp
+index 478a9a0..1221892 100644
+--- a/host/src/conker.hpp
++++ b/host/src/conker.hpp
+@@ -60,6 +60,18 @@ namespace conker {
+     // main.cpp: why a ROM was refused.
+     const char* rom_error_text(recomp::RomValidationError error);
+ 
++#if defined(__PROSPERO__)
++    // The PS5 port (main.cpp): the ROM comes from the title folder, set before the UI (and the launcher in it) is
++    // made. Whether the game has a ROM, and the first ROM file found there that librecomp refused, and why.
++    namespace ps5 {
++        inline bool rom_found = false;
++        inline std::string refused_rom;
++        inline recomp::RomValidationError refused_rom_error = recomp::RomValidationError::Good;
++        // The title folder's name, which the ROM screen names (a title can't see where it's installed).
++        inline constexpr const char* title_id = "PPSA64065";
++    }
++#endif
++
+     // main.cpp: the device info for whichever input backend is active.
+     ultramodern::input::connected_device_info_t get_connected_device_info(int controller_num);
+ 
+diff --git a/host/src/conker_config.cpp b/host/src/conker_config.cpp
+index d824089..f2c1411 100644
+--- a/host/src/conker_config.cpp
++++ b/host/src/conker_config.cpp
+@@ -56,7 +56,13 @@ namespace {
+             "more than the game makes): a drop there is the PC falling behind. "
+             "<recomp-color primary>Game</recomp-color> is the frames the game itself makes, up to 30: a drop there with FPS "
+             "steady is the game's own slowdown, as on the N64.",
+-            fps_choices, ShowFps::Off);
++            fps_choices, ShowFps::Off
++#if defined(__PROSPERO__)
++            // PS5: hidden, in favour of the port's Performance Overlay (the frame rate, a frame-time graph and
++            // memory, from RT64's present thread), further down the same tab.
++            , true
++#endif
++            );
+ 
+         static const std::vector<recomp::config::ConfigOptionEnumOption> border_choices = {
+             {OverscanBorders::Hidden, "Hidden", "Hidden"},
+@@ -169,6 +175,11 @@ void conker::init_config() {
+     conker::rumble::add_options(recompui::config::create_general_tab(general_options));
+     conker::look_aim::add_camera_options(recompui::config::create_config_tab("Camera", camera_tab_id, false));
+     conker::look_aim::add_mouse_gyro_options(recompui::config::create_config_tab("Mouse & Gyro", mouse_gyro_tab_id, false));
++#if defined(__PROSPERO__)
++    // PS5: no mouse, and the SDL joystick driver reports no motion sensors. The options stay (the game reads them
++    // every frame, with the mouse's and the gyro's defaults) but their tab is hidden.
++    recompui::config::set_tab_visible(mouse_gyro_tab_id, false);
++#endif
+ 
+     recomp::config::Config& graphics_config = recompui::config::create_graphics_tab();
+     add_graphics_options(graphics_config);
+@@ -226,6 +237,10 @@ bool conker::model_detail::always_highest() {
+ }
+ 
+ bool conker::fps_counter::enabled() {
++#if defined(__PROSPERO__)
++    // Hidden on the PS5 (the Performance Overlay instead): off, whatever a saved setting says.
++    return false;
++#endif
+     if (!conker::graphics_config_ready()) {
+         return false;
+     }
+diff --git a/host/src/frontend.cpp b/host/src/frontend.cpp
+index 58a7262..f364086 100644
+--- a/host/src/frontend.cpp
++++ b/host/src/frontend.cpp
+@@ -30,6 +30,10 @@
+ #include "recompui/renderer.h"
+ #include "base/ui_launcher.h"
+ #include "util/file.h"
++#if defined(__PROSPERO__)
++#include <chrono>
++#include "elements/ui_image.h"
++#endif
+ 
+ #include "conker.hpp"
+ 
+@@ -203,6 +207,14 @@ namespace {
+ 
+     ultramodern::renderer::WindowHandle create_window(void*) {
+         uint32_t flags = SDL_WINDOW_RESIZABLE;
++#if defined(__PROSPERO__)
++        // Not SDL_WINDOW_VULKAN on the PS5: PacBrew's SDL2 is built without Vulkan, so a Vulkan window fails to
++        // create, and plume presents through VK_KHR_display instead of through the window. SDL's offscreen video
++        // driver has no display to size a window to: the console's display plane is 3840x2160.
++        const int width = 3840;
++        const int height = 2160;
++        std::fprintf(stderr, "[conker] window 3840x2160 (the console's display plane)\n");
++#else
+ #if defined(RT64_SDL_WINDOW_VULKAN)
+         flags |= SDL_WINDOW_VULKAN;
+ #elif defined(__APPLE__)
+@@ -210,6 +222,7 @@ namespace {
+ #endif
+         const int width = conker::frontend::window_width > 0 ? conker::frontend::window_width : 1600;
+         const int height = conker::frontend::window_height > 0 ? conker::frontend::window_height : 900;
++#endif
+         window = SDL_CreateWindow(conker::program_name, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+             width, height, flags);
+         if (window == nullptr) {
+@@ -310,6 +323,146 @@ namespace {
+         });
+     }
+ 
++#if defined(__PROSPERO__)
++    // The ROM screen's background on the PS5: assets/rom-screen.png (1920x1080, made by the port's tools/make-art.py
++    // from the same picture as the home screen's background), filling the launcher's background. Without the file,
++    // the launcher's own background stays. The image's name starts with "?/", as the frontend's own thumbnails do:
++    // any other name is taken as a path in the assets folder, which isn't the name the bytes were queued under, so
++    // the image would stay an empty placeholder (a lesson from the DK64 port).
++    void add_ps5_rom_screen_background(recompui::LauncherMenu* launcher) {
++        std::ifstream file("/app0/assets/rom-screen.png", std::ios::binary);
++        std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++        if (bytes.empty()) {
++            std::fprintf(stderr, "[conker] no assets/rom-screen.png: the ROM screen keeps the launcher's background\n");
++            return;
++        }
++        std::fprintf(stderr, "[conker] ROM screen background: assets/rom-screen.png, %zu bytes\n", bytes.size());
++        recompui::queue_image_from_bytes_file("?/ps5/rom-screen", bytes);
++        auto context = recompui::get_current_context();
++        recompui::Element* image = context.create_element<recompui::Image>(launcher->get_background_container(), "?/ps5/rom-screen");
++        image->set_position(recompui::Position::Absolute);
++        image->set_top(0);
++        image->set_left(0);
++        image->set_width(100, recompui::Unit::Percent);
++        image->set_height(100, recompui::Unit::Percent);
++    }
++
++    // The launcher's message on the PS5, where it only shows when no usable ROM was found: where the ROM goes. The
++    // whole options menu (the message, then Exit) is one dark card, so the text and Exit's highlight stay readable.
++    void add_ps5_rom_message(recompui::GameOptionsMenu* menu) {
++        auto context = recompui::get_current_context();
++        menu->set_background_color({ 0x00, 0x00, 0x00, 0xE0 });
++        menu->set_border_radius(16.0f);
++        menu->set_padding_bottom(16.0f);
++        recompui::Element* panel = context.create_element<recompui::Element>(menu, 0);
++        panel->set_display(recompui::Display::Flex);
++        panel->set_flex_direction(recompui::FlexDirection::Column);
++        panel->set_gap(16.0f);
++        panel->set_padding(32.0f);
++        panel->set_width(100.0f, recompui::Unit::Percent);
++
++        context.create_element<recompui::Label>(panel,
++            conker::ps5::refused_rom.empty() ? "ROM not found" : "This ROM can't be used", recompui::theme::Typography::Header2);
++
++        // Each line, and whether it's the folder's name (shown larger, in the theme's colour).
++        std::vector<std::pair<std::string, bool>> lines;
++        if (!conker::ps5::refused_rom.empty()) {
++            lines.push_back({ conker::ps5::refused_rom + " is in the game's folder, but it can't be used: " +
++                conker::rom_error_text(conker::ps5::refused_rom_error), false });
++        }
++        // The title folder's name only: the game can be installed on the console's storage, a USB drive or M.2
++        // storage, and a title can't see which (it sees its folder as /app0).
++        lines.push_back({ "Copy your Conker's Bad Fur Day ROM into the game's folder, next to eboot.bin:", false });
++        lines.push_back({ conker::ps5::title_id, true });
++        lines.push_back({ "It has to be the USA version, as a .z64, .n64 or .v64 file. Then start the game again.", false });
++        for (const auto& [text, is_folder] : lines) {
++            auto* label = context.create_element<recompui::Label>(panel, text,
++                is_folder ? recompui::theme::Typography::LabelLG : recompui::theme::Typography::Body);
++            label->set_white_space(recompui::WhiteSpace::Normal);
++            if (is_folder) {
++                label->set_color(recompui::theme::color::Primary);
++            }
++        }
++    }
++
++    // The ROM screen's logo (assets/rom-logo.png, Sam's title art, made by tools/make-art.py) and its entrance, as on
++    // the DK64 port's: the logo fades in while growing to its size, then the message card fades in below it.
++    struct Ps5RomScreenAnimation {
++        recompui::Element* logo = nullptr;
++        recompui::Element* card = nullptr;
++        bool started = false;
++        bool finished = false;
++        std::chrono::steady_clock::time_point start{};
++    };
++    Ps5RomScreenAnimation ps5_rom_animation;
++
++    float smootherstep(float x) {
++        x = std::clamp(x, 0.0f, 1.0f);
++        return x * x * x * (x * (x * 6.0f - 15.0f) + 10.0f);
++    }
++
++    void add_ps5_rom_screen_logo(recompui::LauncherMenu* launcher, recompui::GameOptionsMenu* card) {
++        // The launcher's own title (the game's name in plain text) would sit under the logo.
++        launcher->remove_default_title();
++        ps5_rom_animation.card = card;
++        card->set_opacity(0.0f);
++
++        std::ifstream file("/app0/assets/rom-logo.png", std::ios::binary);
++        std::vector<char> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
++        if (bytes.size() < 24) {
++            std::fprintf(stderr, "[conker] no assets/rom-logo.png: the ROM screen has no logo\n");
++            return;
++        }
++        // The PNG's width and height (its IHDR chunk, bytes 16 to 23, big-endian), for the logo's proportions.
++        auto be32 = [&bytes](size_t at) {
++            return (uint32_t(uint8_t(bytes[at])) << 24) | (uint32_t(uint8_t(bytes[at + 1])) << 16) |
++                (uint32_t(uint8_t(bytes[at + 2])) << 8) | uint32_t(uint8_t(bytes[at + 3]));
++        };
++        const uint32_t png_width = be32(16);
++        const uint32_t png_height = be32(20);
++        if (png_width == 0 || png_height == 0) {
++            std::fprintf(stderr, "[conker] assets/rom-logo.png isn't a PNG: the ROM screen has no logo\n");
++            return;
++        }
++        std::fprintf(stderr, "[conker] ROM screen logo: assets/rom-logo.png, %ux%u\n", png_width, png_height);
++        recompui::queue_image_from_bytes_file("?/ps5/rom-logo", bytes);
++        auto context = recompui::get_current_context();
++        recompui::Element* image = context.create_element<recompui::Image>(launcher->get_background_container(), "?/ps5/rom-logo");
++        // Centred across the top, clear of the card (which sits near the bottom). Percent heights are of the 16:9
++        // screen's height, so the height keeps the PNG's proportions.
++        constexpr float width_percent = 44.0f;
++        image->set_position(recompui::Position::Absolute);
++        image->set_top(5.0f, recompui::Unit::Percent);
++        image->set_left((100.0f - width_percent) / 2.0f, recompui::Unit::Percent);
++        image->set_width(width_percent, recompui::Unit::Percent);
++        image->set_height(width_percent * (16.0f / 9.0f) * float(png_height) / float(png_width), recompui::Unit::Percent);
++        image->set_opacity(0.0f);
++        ps5_rom_animation.logo = image;
++    }
++
++    // From the launcher's update, every frame while it shows.
++    void update_ps5_rom_screen() {
++        Ps5RomScreenAnimation& a = ps5_rom_animation;
++        if (a.finished || a.card == nullptr) {
++            return;
++        }
++        const auto now = std::chrono::steady_clock::now();
++        if (!a.started) {
++            a.started = true;
++            a.start = now;
++        }
++        const float t = std::chrono::duration<float>(now - a.start).count();
++        if (a.logo != nullptr) {
++            const float logo_in = smootherstep((t - 0.2f) / 1.2f);
++            a.logo->set_opacity(logo_in);
++            const float scale = 0.8f + 0.2f * logo_in;
++            a.logo->set_scale_2D(scale, scale);
++        }
++        a.card->set_opacity(smootherstep((t - 1.0f) / 0.7f));
++        a.finished = t >= 1.8f;
++    }
++#endif
++
+     // The launcher's options: RecompFrontend's usual ones, with Version and Add ROM after Start Game.
+     void init_launcher(recompui::LauncherMenu* menu) {
+         const recomp::GameEntry& game = supported_games[0];
+@@ -330,6 +483,22 @@ namespace {
+         conker::notices::on_ui_ready();
+         conker::local_achievements::init();
+         conker::reticle::on_ui_ready();
++#if defined(__PROSPERO__)
++        // main starts the game at once when it finds the ROM (--game), so on the PS5 the launcher only shows without
++        // one. Its options can't help there (no file dialog to load a ROM with): it says where the ROM goes, and
++        // offers Exit. (The launcher is still made at every start: the set-up above runs here.)
++        if (!conker::ps5::rom_found) {
++            add_ps5_rom_screen_background(menu);
++            add_ps5_rom_message(options);
++            add_ps5_rom_screen_logo(menu, options);
++        }
++        // Exit isn't focused when the screen shows (no autofocus element), so a button pressed before the message is
++        // read can't close the game: the first press only moves the focus to Exit (the frontend handles the key
++        // before it focuses an element, ui_state.cpp), and the next one presses it.
++        options->add_exit_option();
++        options->set_width(45, recompui::Unit::Percent);
++        return;
++#endif
+         options->add_start_game_or_load_rom_option();
+         version_option = options->add_option("Version", on_version_selected);
+         add_rom_option = options->add_option("Add ROM", on_add_rom_selected);
+@@ -341,6 +510,9 @@ namespace {
+     }
+ 
+     void update_launcher(recompui::LauncherMenu*) {
++#if defined(__PROSPERO__)
++        update_ps5_rom_screen();
++#endif
+         if (conker::roms::update()) {
+             show_version();
+         }
+diff --git a/host/src/main.cpp b/host/src/main.cpp
+index 2e97d08..b2e98a3 100644
+--- a/host/src/main.cpp
++++ b/host/src/main.cpp
+@@ -30,6 +30,17 @@
+ 
+ #include "conker.hpp"
+ 
++#if defined(__PROSPERO__)
++#include <cctype>
++#include "ultramodern/error_handling.hpp"
++#include "ps5_platform.h"
++// Start-up steps in conker.log on the PS5, written out at once so a start that stops shows how far it got.
++#define CONKER_STEP(...) do { std::fprintf(stderr, "[conker start] " __VA_ARGS__); std::fputc('\n', stderr); \
++        conker::ps5::flush_log(); } while (0)
++#else
++#define CONKER_STEP(...) do {} while (0)
++#endif
++
+ #if defined(CONKER_RT64)
+ #include "nfd.h"
+ #include "recompui/program_config.h"
+@@ -391,10 +402,54 @@ namespace {
+     }
+ }
+ 
++#if defined(__PROSPERO__)
++namespace {
++    // No launcher on the PS5 (it has no file dialog to pick a ROM with): the ROM is the copy stored by an earlier
++    // start, else the first .z64, .n64 or .v64 file in the title folder that librecomp accepts. Sets conker::ps5's
++    // rom_found, and the first file refused and why, for the ROM screen.
++    void ps5_find_rom() {
++        recomp::check_all_stored_roms();
++        bool found = recomp::is_rom_valid(game_id);
++        std::error_code ec;
++        for (const auto& entry : std::filesystem::directory_iterator("/app0", ec)) {
++            if (found) {
++                break;
++            }
++            std::string ext = entry.path().extension().string();
++            for (char& c : ext) {
++                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
++            }
++            if (ext != ".z64" && ext != ".n64" && ext != ".v64") {
++                continue;
++            }
++            const recomp::RomValidationError result = recomp::select_rom(entry.path(), game_id);
++            std::fprintf(stderr, "[conker] %s: %s\n", entry.path().string().c_str(),
++                result == recomp::RomValidationError::Good ? "imported" : conker::rom_error_text(result));
++            found = result == recomp::RomValidationError::Good;
++            if (!found && conker::ps5::refused_rom.empty()) {
++                conker::ps5::refused_rom = entry.path().filename().string();
++                conker::ps5::refused_rom_error = result;
++            }
++        }
++        if (!found) {
++            std::fprintf(stderr, "[conker] no Conker's Bad Fur Day (USA) ROM in the title folder\n");
++        }
++        conker::ps5::rom_found = found;
++    }
++}
++#endif
++
+ int main(int argc, char** argv) {
++#if defined(__PROSPERO__)
++    // The log in the title folder (/app0/conker.log), crash reports with a backtrace, SDL's offscreen video driver.
++    // Not unbuffered as on PC: many small writes to the title folder stall the console (ps5_platform.cpp).
++    conker::ps5::init();
++    CONKER_STEP("main: log open, Conker's Bad Fur Day: Recompiled 0.1.6 for the PS5");
++#else
+     // Unbuffered, so diagnostics (e.g. RT64's microcode hashes) survive a crash.
+     std::setvbuf(stdout, nullptr, _IONBF, 0);
+     install_crash_handler();
++#endif
+     std::filesystem::path rom_path;
+     int seconds = 0;
+ #if defined(CONKER_RT64)
+@@ -424,13 +479,21 @@ int main(int argc, char** argv) {
+         }
+     }
+ 
++#if defined(__PROSPERO__)
++    // The title folder. Not exe_directory: std::filesystem::absolute asks for a working directory, which a title
++    // doesn't have (a getcwd that isn't there). recompui's assets are found from /app0 (util/file.cpp).
++    std::filesystem::path old_data_dir = "/app0/conker_data";
++#else
+     std::filesystem::path old_data_dir = exe_directory(argv[0]) / "conker_data";
++#endif
+ #if defined(CONKER_RT64)
+     if (!headless) {
+         // NFD_Init() is called once SDL is up (frontend.cpp's create_gfx).
+         // recompui loads assets/ (and looks for portable.txt) relative to the working
+         // directory: make that the executable's folder, wherever the game is started from.
++#if !defined(__PROSPERO__)
+         std::filesystem::current_path(exe_directory(argv[0]));
++#endif
+         recompui::programconfig::set_program_id(conker::program_id());
+         recomp::register_config_path(recompui::file::get_app_folder_path());
+         migrate_old_data(old_data_dir, recomp::get_config_path());
+@@ -473,9 +536,19 @@ int main(int argc, char** argv) {
+     conker::register_overlays();
+     conker::register_mod_exports();
+ 
++#if defined(__PROSPERO__)
++    // The ROM from the title folder; with one, the game starts at once with the settings as they are (defaults on
++    // the first start), and without one the launcher is the ROM screen (frontend.cpp's init_launcher). Never
++    // return from main on the PS5 (a libc exit is a system call a title may not make).
++    (void)rom_path;
++    ps5_find_rom();
++    start_directly = conker::ps5::rom_found;
++    CONKER_STEP("game registered; ROM %s", conker::ps5::rom_found ? "ready" : "missing");
++#else
+     if (!select_rom(rom_path, start_directly)) {
+         return EXIT_FAILURE;
+     }
++#endif
+ 
+     // librecomp starts a game named on the command line with --game; otherwise the
+     // launcher does.
+@@ -517,7 +590,14 @@ int main(int argc, char** argv) {
+         });
+     }
+ 
++    CONKER_STEP("recomp::start (window, renderer, game thread)");
+     recomp::start(cfg);
++#if defined(__PROSPERO__)
++    // Not reached normally: quitting closes the title through the system (ultramodern::quit). If start returns,
++    // close it the same way rather than return from main.
++    CONKER_STEP("recomp::start returned");
++    ultramodern::error_handling::close_title(true);
++#endif
+ 
+ #if defined(CONKER_RT64)
+     if (!headless) {
+diff --git a/host/src/overlays.cpp b/host/src/overlays.cpp
+index fc72e54..e99ce3a 100644
+--- a/host/src/overlays.cpp
++++ b/host/src/overlays.cpp
+@@ -5,6 +5,8 @@
+ 
+ #ifdef _WIN32
+ #   include <Windows.h>
++#elif defined(__PROSPERO__)
++#   include <ps5platform/kernel.h>
+ #else
+ #   include <sys/mman.h>
+ #endif
+@@ -67,6 +69,27 @@ static bool map_segment(uint8_t* rdram, uint32_t vram, const uint32_t* words, si
+ #ifdef _WIN32
+     DWORD old;
+     bool ok = VirtualProtect(begin, end - begin, PAGE_READWRITE, &old) != 0;
++#elif defined(__PROSPERO__)
++    // PS5: the reservation past RDRAM has no memory behind it to change the protection of (librecomp reserves
++    // the 4 GiB with the kernel and backs only RDRAM's 512 MiB with direct memory). Back these pages with their
++    // own direct memory instead, mapped into the reservation at their place. 64 KiB pages, as the kernel's.
++    const size_t length = size_t(end - begin);
++    int64_t direct = 0;
++    int32_t res = sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(), length,
++        PS5_KERNEL_DIRECT_ALIGNMENT, PS5_KERNEL_DIRECT_TYPE_CPU, &direct);
++    bool ok = res == 0;
++    if (ok) {
++        void* mapped = begin;
++        res = sceKernelMapDirectMemory(&mapped, length, PS5_KERNEL_PROT_CPU_READ | PS5_KERNEL_PROT_CPU_WRITE,
++            PS5_KERNEL_MAP_FIXED, direct, PS5_KERNEL_DIRECT_ALIGNMENT);
++        ok = res == 0 && mapped == begin;
++        if (!ok) {
++            sceKernelReleaseDirectMemory(direct, length);
++        }
++    }
++    std::fprintf(stderr, "[overlays] 0x%08X (+0x%zX): %zu KiB of direct memory at %p %s (0x%08X)\n", vram, size,
++        length / 1024, (void*)begin, ok ? "mapped" : "not mapped", (unsigned)res);
++    std::fflush(stderr);
+ #else
+     bool ok = mprotect(begin, end - begin, PROT_READ | PROT_WRITE) == 0;
+ #endif
+diff --git a/host/src/rumble.cpp b/host/src/rumble.cpp
+index e834831..4a429f7 100644
+--- a/host/src/rumble.cpp
++++ b/host/src/rumble.cpp
+@@ -36,6 +36,15 @@ namespace {
+ 
+     template <typename T>
+     T option(const std::string& id) {
++#if defined(__PROSPERO__)
++        // PS5: Motor and Style are hidden (Strength stays): their defaults, whatever a saved setting says.
++        if (id == options::motor) {
++            return static_cast<T>(static_cast<uint32_t>(Motor::Small));
++        }
++        if (id == options::style) {
++            return static_cast<T>(static_cast<uint32_t>(Style::Smooth));
++        }
++#endif
+         return static_cast<T>(std::get<uint32_t>(recompui::config::get_general_config().get_option_value(id)));
+     }
+ 
+@@ -71,6 +80,12 @@ namespace {
+ }
+ 
+ void conker::rumble::add_options(recomp::config::Config& config) {
++#if defined(__PROSPERO__)
++    // PS5: only Strength is shown; Motor and Style keep their defaults (option() above).
++    constexpr bool ps5_hidden = true;
++#else
++    constexpr bool ps5_hidden = false;
++#endif
+     using EnumOptions = const std::vector<recomp::config::ConfigOptionEnumOption>;
+     static EnumOptions motors = {
+         {Motor::Small, "Small", "Small"},
+@@ -91,12 +106,12 @@ void conker::rumble::add_options(recomp::config::Config& config) {
+         "<recomp-color primary>Small</recomp-color>: the quick, light one (as before). "
+         "<recomp-color primary>Large</recomp-color>: the slow, heavy one, closer to the Rumble Pak's own motor. "
+         "<recomp-color primary>Both</recomp-color>: both at once.",
+-        motors, Motor::Small);
++        motors, Motor::Small, ps5_hidden);
+     config.add_enum_option(options::style, "Rumble: Style",
+         "How the rumble follows the game. <recomp-color primary>Smooth</recomp-color>: it eases in and out (as before). "
+         "<recomp-color primary>On/Off</recomp-color>: it starts and stops exactly when the game turns the Rumble Pak "
+         "on and off, as a real Rumble Pak and controllers with an on/off motor do.",
+-        styles, Style::Smooth);
++        styles, Style::Smooth, ps5_hidden);
+ }
+ 
+ void conker::rumble::set(int port, bool on) {
+diff --git a/host/src/texture_packs.cpp b/host/src/texture_packs.cpp
+index f3342f7..0a21287 100644
+--- a/host/src/texture_packs.cpp
++++ b/host/src/texture_packs.cpp
+@@ -71,6 +71,10 @@ namespace {
+     }
+ 
+     uint32_t selected() {
++#if defined(__PROSPERO__)
++        // PS5: the setting is hidden; the Mods menu turns packs on and off, whatever a saved setting says.
++        return mods_menu;
++#endif
+         recomp::config::Config* config = recompui::config::find_option_config(option_id);
+         return config ? std::get<uint32_t>(config->get_option_value(option_id)) : mods_menu;
+     }
+@@ -116,7 +120,13 @@ void conker::texture_packs::add_options(recomp::config::Config& config) {
+         "<recomp-color primary>Set in the Mods Menu</recomp-color> leaves the packs as the Mods menu has them, where "
+         "several can be on at once. <recomp-color primary>None</recomp-color> turns them all off. Choosing a pack turns "
+         "it on and the others off.",
+-        options, mods_menu);
++        options, mods_menu
++#if defined(__PROSPERO__)
++        // PS5: hidden; texture packs are managed in the Mods menu (where several can be layered, and long pack
++        // names fit).
++        , true
++#endif
++        );
+     config.add_option_change_callback(option_id,
+         [](recomp::config::ConfigValueVariant, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
+             // Once applied: the Graphics tab keeps a choice as temporary until its Apply button
+diff --git a/tools/texture_packs/gliden64_to_rt64.py b/tools/texture_packs/gliden64_to_rt64.py
+index 9ae4dde..6dde581 100644
+--- a/tools/texture_packs/gliden64_to_rt64.py
++++ b/tools/texture_packs/gliden64_to_rt64.py
+@@ -61,7 +61,9 @@ HASHER_DIRS = ["host/build-win/rt64/src/tools/texture_hasher", "host/build/rt64/
+ 
+ 
+ def rice_key(crc, fmt, siz, palette):
+-    key = "%08x#%d#%d" % (crc, fmt, siz)
++    # fmt and siz are "any" for a texture from an old cache, which doesn't record them: the game's RT64 then
++    # matches it by its CRCs alone (the PS5 port's rt64_rice_hash.cpp), as GLideN64 did with those caches.
++    key = "%08x#%s#%s" % (crc, fmt, siz)
+     return key + ("#%08x" % palette if palette else "")
+ 
+ 
+@@ -89,17 +91,27 @@ def unpack_htc(path, out):
+     skipped = 0
+     with gzip.open(path, "rb") as f:
+         version, = struct.unpack("<i", read_exact(f, 4))
+-        if version != HTC_VERSION:
+-            sys.exit(f"{path}: an old GLideN64 cache, without the textures' N64 format and size. "
+-                     "Rebuild it with a current GLideN64, or convert the pack's PNG folder instead.")
+-        read_exact(f, 4)  # config
++        # An old cache starts with its config instead of the version, and its textures have no N64 format and
++        # size: they're named with "any" for both, and the game's RT64 matches them by their CRCs alone.
++        old = version != HTC_VERSION
++        if old:
++            print(f"  {os.path.basename(path)}: an old GLideN64 cache (no N64 format and size): "
++                  "textures are named for matching by their CRCs alone")
++        else:
++            read_exact(f, 4)  # config
+         while True:
+             try:
+                 checksum, = struct.unpack("<Q", read_exact(f, 8))
+             except EOFError:
+                 break
+-            width, height, gl_format, _, pixel_type, _, formatsize, size = struct.unpack(
+-                "<IIIHHBHI", read_exact(f, 4 + 4 + 4 + 2 + 2 + 1 + 2 + 4))
++            if old:
++                width, height, gl_format, _, pixel_type, _, size = struct.unpack(
++                    "<IIIHHBI", read_exact(f, 4 + 4 + 4 + 2 + 2 + 1 + 4))
++                fmt = siz = "any"
++            else:
++                width, height, gl_format, _, pixel_type, _, formatsize, size = struct.unpack(
++                    "<IIIHHBHI", read_exact(f, 4 + 4 + 4 + 2 + 2 + 1 + 2 + 4))
++                fmt, siz = formatsize & 0xFF, formatsize >> 8
+             data = read_exact(f, size)
+             if gl_format & GL_TEXFMT_GZ:
+                 data = zlib.decompress(data)
+@@ -107,8 +119,7 @@ def unpack_htc(path, out):
+                 skipped += 1  # compressed (S3TC) or packed formats
+                 continue
+             crc, palette = checksum & 0xFFFFFFFF, checksum >> 32
+-            fmt, siz = formatsize & 0xFF, formatsize >> 8
+-            name = "%s#%08X#%d#%d%s_all.png" % (ROM_NAME, crc, fmt, siz, "#%08X" % palette if palette else "")
++            name = "%s#%08X#%s#%s%s_all.png" % (ROM_NAME, crc, fmt, siz, "#%08X" % palette if palette else "")
+             with open(os.path.join(out, name), "wb") as png:
+                 png.write(png_bytes(width, height, data))
+             files[rice_key(crc, fmt, siz, palette)] = name
