@@ -35,37 +35,47 @@ menu's top right corner.
 **Updating**: copy the new `PPSA64065` folder over the old one, merging it. Your saves (`saves/`), settings (the
 `.json` files), added mods and texture packs (`mods/`) and the ROM copy are kept: a release contains none of them.
 
-## Texture packs (recommended)
+## Texture pack (recommended)
 
-Two packs, used together, replace most of the game's textures. Neither is included in the release: they're their
-authors' work. Copy each `.rtz` into the `mods` folder inside `PPSA64065` (the game makes it on its first start),
-then switch them on under **Mods** in the menu.
+Three community texture packs, merged into one file ready to copy to the console, are in
+[CBFD-Recompiled-PS5-Texture-Pack](https://github.com/Samclay8/CBFD-Recompiled-PS5-Texture-Pack), with full credit
+to their authors (none is included in this release: they're their authors' work):
 
-- **HD Icons** by dahmedvall95, from GameBeast92's 4K Ultimate Texture Pack (CC BY 4.0): the HUD, menus, logos and
-  the speech bubbles' lettering, sharp and in the original colours. Download
-  `ConkerBFDReloaded-HD-Icons-v1.3.3.rtz` from
-  [Conker's Bad Fur Day: Reloaded's releases](https://github.com/DahSidiAbdallah/ConkerBFDReloaded/releases/tag/v1.4.7).
-- **AI Upscale** by Nikachu (2022): nearly every other texture, upscaled (text, Conker's eyes and the skies are
-  left original). It's a GLideN64 pack in an older format, so it needs converting on a PC once:
-  1. Download it from [N64Textures](https://www.n64textures.com/downloads/?lang=en) (Conker's Bad Fur Day, by
-     Nikachu) and extract `CONKER BFD_HIRESTEXTURES.htc` from the `.rar`.
-  2. With Python 3 (nothing else to install), run this repository's
-     [`tools/gliden64_to_rt64.py`](tools/gliden64_to_rt64.py):
-     ```sh
-     python gliden64_to_rt64.py "CONKER BFD_HIRESTEXTURES.htc" --out nikachu --name "AI Upscale (Nikachu)" --author Nikachu --rtz conker_ai_upscale_nikachu.rtz
-     ```
-  3. Copy `conker_ai_upscale_nikachu.rtz` (about 30 MB) into `mods`.
+- **4K Ultimate Texture Pack** by GameBeast92, a work in progress: the characters, title, intro, HUD and menus, and
+  parts of several chapters and the multiplayer maps, redrawn in 4K. Its newest builds appear first in
+  [GameBeast92's Discord](https://discord.gg/up8wah5hFu).
+- **HD Icons** by dahmedvall95, from GameBeast92's artwork (CC BY 4.0): the pictures the 4K pack doesn't have yet,
+  mostly the speech bubbles' letters.
+- **AI Upscale** by Nikachu (2022), from [N64Textures](https://www.n64textures.com/downloads/?lang=en): nearly every
+  other texture, upscaled.
 
-Where both packs replace a picture, HD Icons' version is used, whatever their order. Both hold 60 fps on the
-console. Other packs work the same way: RT64 `.rtz` packs as they are, GLideN64 packs (`.htc`, or a folder of
-Rice-named `.png` files) after the same conversion.
+**[Download CBFD-PS5-Texture-Pack.rtz](https://github.com/Samclay8/CBFD-Recompiled-PS5-Texture-Pack/releases/latest/download/CBFD-PS5-Texture-Pack.rtz)**
+(about 450 MB), copy it into the `mods` folder inside `PPSA64065` (the game makes it on its first start), and switch
+on **4K + HD Icons + AI Upscale** under **Mods** in the menu. Each texture comes from the first of the three that has
+it, so there's no order to set.
+
+With more than one pack, the one higher in the **Mods** list is generally used where two replace the same picture.
+A newly added pack goes to the top. To move one, select it, press Triangle, move it with the D-pad and press Triangle
+again.
+
+Other packs work too: RT64 `.rtz` packs as they are, and GLideN64 packs (`.htc`, or a folder of Rice-named `.png`
+files) after converting them on a PC with this repository's [`tools/gliden64_to_rt64.py`](tools/gliden64_to_rt64.py)
+(Python 3):
+
+```sh
+python gliden64_to_rt64.py "PACK_HIRESTEXTURES.htc" --out pack --name "Pack name" --author "Author" --rtz pack.rtz
+```
 
 ## Mods
 
-Code mods (`.nrm`) made for Conker's Bad Fur Day: Recompiled load from `mods/` too, such as its own Skip Intro,
-Skip Any Cutscene and Cheats ([V0.1.6 mods](https://github.com/sciaschi/CBFD-Recompiled/releases/tag/V0.1.6)).
-They haven't been tested on the console yet. A code mod can't change while the game runs: its switch asks to close
-the game, and the change applies when it is started again.
+Two of Conker's Bad Fur Day: Recompiled's own mods, Skip Intro and Skip Any Cutscene, are built in as one setting,
+**Skip Cutscenes** on the **General** tab: **Off** (the default, as the game was), **Intro Only** (start at the bar, a
+button press from the main menu) or **All** (that, and L1 skips any cutscene, even the first time).
+
+Other code mods (`.nrm`) made for Conker's Bad Fur Day: Recompiled load from `mods/` too, such as its Cheats
+([V0.1.6 mods](https://github.com/sciaschi/CBFD-Recompiled/releases/tag/V0.1.6)). They haven't been tested on the
+console yet. A code mod can't change while the game runs: its switch asks to close the game, and the change applies
+when it is started again.
 
 ## What's different on the PS5
 
@@ -73,9 +83,15 @@ the game, and the change applies when it is started again.
   ROM screen, when no usable ROM is found.
 - 4K output, the game's 30 fps interpolated to 60 (Framerate **Original** keeps 30).
 - A menu for the console: PlayStation button prompts, and no options that only make sense on a PC (window, mouse,
-  keyboard, gyro, the rumble motor and style). Texture packs are switched in the **Mods** menu only.
+  keyboard, gyro, the rumble motor and style). Texture packs are switched in the **Mods** menu only, and are put in
+  order there with the controller (Triangle, the D-pad, Triangle) rather than by dragging with a mouse.
 - A **Performance Overlay** option (Graphics tab): frame rate, a frame-time graph and memory, in place of the PC
   version's Show FPS.
+- A **Skip Cutscenes** setting (General tab: Off by default, Intro Only, All), so the Skip Intro and Skip Any
+  Cutscene mods needn't be installed.
+- Pausing freezes the picture as it was, in 4K across the whole screen, without the game's blur. The blur is done
+  by the N64's CPU at the N64's resolution and 4:3, so in widescreen the PC version zooms that copy up to fill the
+  screen, and it jumped from the sharp picture to the blurred one as the game paused.
 - `conker.log` in the title folder records the start-up, errors and crash reports, with the previous session's
   log kept as `conker.prev.log`. Please include them when reporting a problem.
 
@@ -149,9 +165,11 @@ them.
   permissive licences
 - **RmlUi**, **lunasvg**, **Dear ImGui**: MIT. **Inter**, **Noto Emoji**, **PromptFont**: SIL Open Font Licence
 - Home screen art and logo by Samclay8, made with ChatGPT
-- Texture packs (not included): **HD Icons** by dahmedvall95 from **GameBeast92**'s
+- Texture packs (not included; merged in
+  [CBFD-Recompiled-PS5-Texture-Pack](https://github.com/Samclay8/CBFD-Recompiled-PS5-Texture-Pack)): **GameBeast92**'s
   [4K Ultimate Texture Pack](https://github.com/GameBeast92/Conker-s-Bad-Fur-Day-4k-Ultimate-Texture-Pack)
-  (CC BY 4.0), and **Nikachu**'s AI Upscale
+  (CC BY 4.0 on GitHub; newest build in [his Discord](https://discord.gg/up8wah5hFu)), **HD Icons** by dahmedvall95
+  from GameBeast92's artwork, and **Nikachu**'s [AI Upscale](https://www.n64textures.com/downloads/?lang=en)
 
 Conker's Bad Fur Day is © Rare Ltd. "PlayStation" and "PS5" are trademarks of Sony Interactive Entertainment. This
 project is not affiliated with or endorsed by Rare, Microsoft, Nintendo or Sony.

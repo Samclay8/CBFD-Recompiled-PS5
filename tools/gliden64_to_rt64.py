@@ -228,6 +228,7 @@ def main():
     if args.rtz:
         with zipfile.ZipFile(args.rtz, "w", zipfile.ZIP_STORED) as z:
             z.write(os.path.join(out, "rt64.json"), "rt64.json")
+            z.write(os.path.join(out, "mod.json"), "mod.json")
             for name in sorted(files[key] for key in matched):
                 z.write(os.path.join(out, name), name)
         print(f"  {args.rtz}: {len(matched)} textures")

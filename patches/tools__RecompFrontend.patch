@@ -172,10 +172,20 @@ index c91df6f..2670da3 100644
          static_assert(false, "Unimplemented for this platform.");
  #endif
 diff --git a/recompui/src/composites/ui_mod_menu.cpp b/recompui/src/composites/ui_mod_menu.cpp
-index 35a9952..22aefc3 100644
+index 35a9952..6256461 100644
 --- a/recompui/src/composites/ui_mod_menu.cpp
 +++ b/recompui/src/composites/ui_mod_menu.cpp
-@@ -26,7 +26,32 @@ static std::string generate_thumbnail_src_for_mod(const std::string &mod_id) {
+@@ -9,6 +9,9 @@
+ #include "config/ui_config_page_options_menu.h"
+ 
+ #include "librecomp/mods.hpp"
++#include "recompinput/recompinput.h"
++#include "recompinput/profiles.h"
++#include "recompinput/promptfont.h"
+ 
+ #include <string>
+ 
+@@ -26,7 +29,32 @@ static std::string generate_thumbnail_src_for_mod(const std::string &mod_id) {
      return "?/mods/" + mod_id + "/thumb";
  }
  
@@ -208,7 +218,101 @@ index 35a9952..22aefc3 100644
      return recomp::mods::is_mod_enabled(mod_id) || recomp::mods::is_mod_auto_enabled(mod_id);
  }
  
-@@ -305,6 +330,9 @@ void ModMenu::open_mods_folder() {
+@@ -47,6 +75,10 @@ void create_mod_config_modal() {
+ // ModEntryView
+ constexpr float modEntryHeight = 120.0f;
+ constexpr float modEntryPadding = 4.0f;
++// An entry picked up to be moved with the controller (ModMenu::mod_key_pressed).
++constexpr std::string_view moving_state = "moving";
++// Given to ModMenu::mod_key_pressed when an entry loses focus, in place of a key.
++constexpr int mod_entry_focus_lost = -1;
+ 
+ extern const std::string mod_tab_id;
+ const std::string mod_tab_id = "#tab_mods";
+@@ -71,6 +103,8 @@ ModEntryView::ModEntryView(ResourceId rid, Element *parent) : Element(rid, paren
+     hover_style.set_border_color(theme::color::BorderHard);
+     checked_hover_style.set_border_color(theme::color::Text);
+     pulsing_style.set_border_color(theme::color::SecondaryA80);
++    moving_style.set_border_color(theme::color::Primary);
++    moving_style.set_background_color(theme::color::PrimaryA30);
+ 
+     {
+         thumbnail_image = context.create_element<Image>(this, "");
+@@ -101,6 +135,7 @@ ModEntryView::ModEntryView(ResourceId rid, Element *parent) : Element(rid, paren
+     add_style(&hover_style, hover_state);
+     add_style(&checked_hover_style, { checked_state, hover_state });
+     add_style(&pulsing_style, { focus_state });
++    add_style(&moving_style, moving_state);
+ }
+ 
+ ModEntryView::~ModEntryView() {
+@@ -128,6 +163,10 @@ void ModEntryView::set_focused(bool focused) {
+     set_style_enabled(focus_state, focused);
+ }
+ 
++void ModEntryView::set_moving(bool moving) {
++    set_style_enabled(moving_state, moving);
++}
++
+ void ModEntryView::process_event(const Event &e) {
+     switch (e.type) {
+     case EventType::Update:
+@@ -145,7 +184,15 @@ void ModEntryView::process_event(const Event &e) {
+ 
+ // ModEntryButton
+ 
+-ModEntryButton::ModEntryButton(ResourceId rid, Element *parent, uint32_t mod_index) : Element(rid, parent, Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::Drag)) {
++#if defined(__PROSPERO__)
++// PS5: no pointer to drag entries with, so keys reach the entry too (handle_navigation_event): the order is
++// changed with the controller (ModMenu::mod_key_pressed).
++static constexpr uint32_t mod_entry_events = Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::Drag, EventType::Navigate);
++#else
++static constexpr uint32_t mod_entry_events = Events(EventType::Click, EventType::Hover, EventType::Focus, EventType::Drag);
++#endif
++
++ModEntryButton::ModEntryButton(ResourceId rid, Element *parent, uint32_t mod_index) : Element(rid, parent, mod_entry_events) {
+     this->mod_index = mod_index;
+ 
+     set_drag(Drag::Drag);
+@@ -192,11 +239,37 @@ void ModEntryButton::set_focused(bool focused) {
+     }
+ }
+ 
++void ModEntryButton::set_moving(bool moving) {
++    view->set_moving(moving);
++}
++
++void ModEntryButton::set_mod_key_callback(std::function<bool(uint32_t, int)> callback) {
++    key_callback = callback;
++}
++
++bool ModEntryButton::handle_navigation_event(Rml::Event &event) {
++    if (key_callback == nullptr || event.GetId() != Rml::EventId::Keydown) {
++        return false;
++    }
++
++    const int rml_key = event.GetParameter<int>("key_identifier", Rml::Input::KI_UNKNOWN);
++    if (key_callback(mod_index, rml_key)) {
++        // Used here: the document doesn't move the focus, and no menu action is taken.
++        event.StopPropagation();
++        return true;
++    }
++
++    return false;
++}
++
+ void ModEntryButton::process_event(const Event& e) {
+     switch (e.type) {
+     case EventType::Focus:
+         selected_callback(mod_index);
+         set_focused(std::get<EventFocus>(e.variant).active);
++        if (!std::get<EventFocus>(e.variant).active && key_callback != nullptr) {
++            key_callback(mod_index, mod_entry_focus_lost);
++        }
+         break;
+     case EventType::Hover:
+         view->set_style_enabled(hover_state, std::get<EventHover>(e.variant).active);
+@@ -305,6 +378,9 @@ void ModMenu::open_mods_folder() {
  #elif defined(__linux__)
      std::string command = "xdg-open \"" + mods_directory.string() + "\" &";
      std::system(command.c_str());
@@ -218,7 +322,7 @@ index 35a9952..22aefc3 100644
  #elif defined(__APPLE__)
      std::string command = "open \"" + mods_directory.string() + "\"";
      std::system(command.c_str());
-@@ -329,7 +357,13 @@ void ModMenu::open_install_dialog() {
+@@ -329,7 +405,13 @@ void ModMenu::open_install_dialog() {
  
  void ModMenu::mod_toggled(bool enabled) {
      if (active_mod_index >= 0) {
@@ -233,7 +337,7 @@ index 35a9952..22aefc3 100644
          
          // Refresh enabled status for all mods in case one of them got auto-enabled due to being a dependency.
          for (size_t i = 0; i < mod_entry_buttons.size(); i++) {
-@@ -349,12 +383,15 @@ void ModMenu::mod_selected(uint32_t mod_index) {
+@@ -349,12 +431,15 @@ void ModMenu::mod_selected(uint32_t mod_index) {
          std::string thumbnail_src = generate_thumbnail_src_for_mod(mod_details[mod_index].mod_id);
          const recomp::config::ConfigSchema &config_schema = recomp::mods::get_mod_config_schema(mod_details[active_mod_index].mod_id);
          bool toggle_checked = is_mod_enabled_or_auto(mod_details[mod_index].mod_id);
@@ -251,7 +355,135 @@ index 35a9952..22aefc3 100644
          mod_entry_buttons[active_mod_index]->set_selected(true);
      }
  }
-@@ -654,9 +691,9 @@ void ModMenu::process_event(const Event &e) {
+@@ -474,6 +559,97 @@ void ModMenu::mod_dragged(uint32_t mod_index, EventDrag drag) {
+     }
+ }
+ 
++// PS5: the list's order is changed with the controller, as there's no pointer to drag entries with. The apply
++// button (Triangle) picks the focused entry up; up and down then move it a place at a time, each move made
++// and saved as a drag's is (set_mod_index); the apply button again, Cross or the back button puts it down.
++// Left and right do nothing meanwhile, so the focus stays on it. A pack higher in the list wins where two
++// replace the same texture (rt64_render_context.cpp), which is what the order is for.
++bool ModMenu::mod_key_pressed(uint32_t mod_index, int rml_key) {
++    if (rml_key == mod_entry_focus_lost) {
++        // Left by other means (another tab, the menu closed): put it down.
++        if (moving_mod_index == static_cast<int32_t>(mod_index)) {
++            set_moving_mod(-1);
++        }
++        return false;
++    }
++
++    const MenuAction action = menu_action_mapping::menu_action_from_rml_key(static_cast<Rml::Input::KeyIdentifier>(rml_key));
++    if (moving_mod_index < 0) {
++        if (action == MenuAction::Apply && mod_index < mod_entry_buttons.size()) {
++            set_moving_mod(static_cast<int32_t>(mod_index));
++            return true;
++        }
++        return false;
++    }
++
++    switch (rml_key) {
++    case Rml::Input::KI_UP:
++        if (moving_mod_index > 0) {
++            move_mod(moving_mod_index, moving_mod_index - 1);
++        }
++        return true;
++    case Rml::Input::KI_DOWN:
++        if (static_cast<size_t>(moving_mod_index) + 1 < mod_entry_buttons.size()) {
++            move_mod(moving_mod_index, moving_mod_index + 1);
++        }
++        return true;
++    case Rml::Input::KI_LEFT:
++    case Rml::Input::KI_RIGHT:
++        return true;
++    default:
++        break;
++    }
++
++    if (action == MenuAction::Apply || action == MenuAction::Accept || action == MenuAction::Back) {
++        set_moving_mod(-1);
++        return true;
++    }
++
++    // Another tab, or the menu closing: put it down, and let the action happen.
++    if (action != MenuAction::None) {
++        set_moving_mod(-1);
++    }
++    return false;
++}
++
++void ModMenu::move_mod(uint32_t from_index, uint32_t to_index) {
++    // As at the end of a drag: re-order the mods and update all the entries.
++    recomp::mods::set_mod_index(game_mod_id, mod_details[from_index].mod_id, to_index);
++    mod_details = recomp::mods::get_all_mod_details(game_mod_id);
++    for (size_t i = 0; i < mod_entry_buttons.size(); i++) {
++        mod_entry_buttons[i]->set_mod_details(mod_details[i]);
++        mod_entry_buttons[i]->set_mod_thumbnail(generate_thumbnail_src_for_mod(mod_details[i].mod_id));
++        mod_entry_buttons[i]->set_mod_enabled(is_mod_enabled_or_auto(mod_details[i].mod_id));
++    }
++
++    // The picked-up entry is now the one at to_index: the highlight and the focus follow it. The entry it
++    // left loses the focus after this, and isn't the picked-up one any more (mod_key_pressed).
++    mod_entry_buttons[from_index]->set_moving(false);
++    moving_mod_index = static_cast<int32_t>(to_index);
++    mod_entry_buttons[to_index]->set_moving(true);
++    mod_selected(to_index);
++    mod_entry_buttons[to_index]->focus();
++}
++
++void ModMenu::set_moving_mod(int32_t mod_index) {
++    if (moving_mod_index >= 0 && static_cast<size_t>(moving_mod_index) < mod_entry_buttons.size()) {
++        mod_entry_buttons[moving_mod_index]->set_moving(false);
++    }
++    moving_mod_index = mod_index;
++    if (moving_mod_index >= 0) {
++        mod_entry_buttons[moving_mod_index]->set_moving(true);
++    }
++    render_order_notice();
++}
++
++void ModMenu::render_order_notice() {
++    if (order_notice_idle == nullptr || order_notice_moving == nullptr) {
++        return;
++    }
++    order_notice_idle->set_display(moving_mod_index < 0 ? Display::Flex : Display::None);
++    order_notice_moving->set_display(moving_mod_index < 0 ? Display::None : Display::Flex);
++}
++
+ bool ModMenu::handle_special_config_options(const recomp::config::ConfigOption& option, const recomp::config::ConfigValueVariant& config_value) {
+     if (recompui::renderer::is_texture_pack_enable_config_option(option, true)) {
+         if (option.type == recomp::config::ConfigOptionType::Enum) {
+@@ -604,6 +780,9 @@ void ModMenu::create_mod_list() {
+     list_scroll_container->clear_children();
+     mod_entry_buttons.clear();
+     mod_entry_spacers.clear();
++    // The entries are made anew: nothing is picked up.
++    moving_mod_index = -1;
++    render_order_notice();
+ 
+     // Create the child elements for the list scroll.
+     for (size_t mod_index = 0; mod_index < mod_details.size(); mod_index++) {
+@@ -620,6 +799,9 @@ void ModMenu::create_mod_list() {
+         ModEntryButton *mod_entry = context.create_element<ModEntryButton>(list_scroll_container, mod_index);
+         mod_entry->set_mod_selected_callback([this](uint32_t mod_index){ mod_selected(mod_index); });
+         mod_entry->set_mod_drag_callback([this](uint32_t mod_index, recompui::EventDrag drag){ mod_dragged(mod_index, drag); });
++#if defined(__PROSPERO__)
++        mod_entry->set_mod_key_callback([this](uint32_t mod_index, int rml_key){ return mod_key_pressed(mod_index, rml_key); });
++#endif
+         mod_entry->set_mod_details(mod_details[mod_index]);
+         mod_entry->set_mod_thumbnail(thumbnail_name);
+         mod_entry->set_mod_enabled(is_mod_enabled_or_auto(mod_details[mod_index].mod_id));
+@@ -637,6 +819,9 @@ void ModMenu::create_mod_list() {
+     bool mods_available = !mod_details.empty();
+     body_container->set_display(mods_available ? Display::Flex : Display::None);
+     body_empty_container->set_display(mods_available ? Display::None : Display::Flex);
++    if (order_notice != nullptr) {
++        order_notice->set_display(mods_available ? Display::Flex : Display::None);
++    }
+     if (mods_available) {
+         mod_selected(0);
+     }
+@@ -654,9 +839,9 @@ void ModMenu::process_event(const Event &e) {
              refresh_button->set_enabled(false);
          }
          if (active_mod_index != -1) {        
@@ -263,7 +495,7 @@ index 35a9952..22aefc3 100644
              if (!toggle_enabled) {
                  mod_details_panel->disable_toggle();
              }
-@@ -742,6 +779,11 @@ ModMenu::ModMenu(ResourceId rid, Element *parent) : Element(rid, parent) {
+@@ -742,6 +927,54 @@ ModMenu::ModMenu(ResourceId rid, Element *parent) : Element(rid, parent) {
              mods_folder_button = context.create_element<Button>(footer_container, "Open Mods Folder", recompui::ButtonStyle::Tertiary);
              mods_folder_button->add_pressed_callback([this](){ open_mods_folder(); });
          } // footer_container
@@ -271,11 +503,54 @@ index 35a9952..22aefc3 100644
 +        // PS5: no file dialog or file browser, and the game has started before this menu exists, so installing
 +        // and rescanning are always off. Mods are added over FTP to the mods folder before a start.
 +        footer_container->set_display(Display::None);
++
++        // In its place, what the order is for and how to change it with the controller (mod_key_pressed).
++        order_notice = context.create_element<Container>(this, FlexDirection::Column, JustifyContent::FlexStart);
++        order_notice->set_width(100.0f, recompui::Unit::Percent);
++        order_notice->set_background_color(theme::color::BGShadow);
++        order_notice->set_border_top_width(theme::border::width);
++        order_notice->set_border_top_color(theme::color::BorderSoft);
++        order_notice->set_padding_left(20.0f);
++        order_notice->set_padding_right(20.0f);
++        order_notice->set_padding_top(14.0f);
++        order_notice->set_padding_bottom(14.0f);
++        order_notice->set_gap(8.0f);
++        order_notice->set_border_bottom_left_radius(16.0f);
++        order_notice->set_border_bottom_right_radius(16.0f);
++        {
++            Label *order_about = context.create_element<Label>(order_notice,
++                "Where texture packs replace the same picture, the one higher in the list is used.", theme::Typography::LabelSM);
++            order_about->set_color(theme::color::TextA80);
++
++            // The controls, as button prompts: one row while nothing is picked up, one while an entry is.
++            const int profile = recompinput::profiles::get_input_profile_for_player(0, recompinput::InputDevice::Controller);
++            const recompinput::InputField apply_binding = recompinput::profiles::get_input_binding(profile, recompinput::GameInput::APPLY_MENU, 0);
++            const std::string apply_prompt = apply_binding.is_empty() ? std::string(PF_SONY_Y) : apply_binding.to_string();
++            auto make_row = [&](std::initializer_list<std::pair<std::string, bool>> parts) {
++                Container *row = context.create_element<Container>(order_notice, FlexDirection::Row, JustifyContent::FlexStart);
++                row->set_align_items(AlignItems::Center);
++                row->set_gap(6.0f);
++                row->set_color(theme::color::TextA80);
++                for (const auto &[text, is_prompt] : parts) {
++                    Label *part = context.create_element<Label>(row, text, theme::Typography::LabelSM);
++                    if (is_prompt) {
++                        part->set_font_family("promptfont");
++                        part->set_font_style(FontStyle::Normal);
++                        part->set_font_weight(400);
++                    }
++                }
++                return row;
++            };
++            order_notice_idle = make_row({ { "To move the selected one, press", false }, { apply_prompt, true } });
++            order_notice_moving = make_row({ { PF_DPAD_UP_DOWN, true }, { "Move up or down,", false },
++                { apply_prompt, true }, { "Done", false } });
++            order_notice_moving->set_display(Display::None);
++        }
 +#endif
      } // this
      
      mod_entry_floating_view = context.create_element<ModEntryView>(this);
-@@ -775,6 +817,16 @@ void update_mod_list(bool scan_mods) {
+@@ -775,6 +1008,16 @@ void update_mod_list(bool scan_mods) {
      }
  }
  
@@ -292,6 +567,72 @@ index 35a9952..22aefc3 100644
  void update_game_mod_id(const std::string &game_mod_id) {
      current_game_mod_id = game_mod_id;
  }
+diff --git a/recompui/src/composites/ui_mod_menu.h b/recompui/src/composites/ui_mod_menu.h
+index 294c371..1fee1f5 100644
+--- a/recompui/src/composites/ui_mod_menu.h
++++ b/recompui/src/composites/ui_mod_menu.h
+@@ -19,6 +19,8 @@ public:
+     void set_mod_enabled(bool enabled);
+     void set_selected(bool selected);
+     void set_focused(bool focused);
++    // PS5: picked up to be moved with the controller (ModMenu::mod_key_pressed).
++    void set_moving(bool moving);
+ protected:
+     virtual void process_event(const Event &e) override;
+     std::string_view get_type_name() override { return "ModEntryView"; }
+@@ -31,6 +33,7 @@ private:
+     Style hover_style;
+     Style checked_hover_style;
+     Style pulsing_style;
++    Style moving_style;
+ };
+ 
+ class ModEntryButton : public Element {
+@@ -44,14 +47,20 @@ public:
+     void set_mod_enabled(bool enabled);
+     void set_selected(bool selected);
+     void set_focused(bool focused);
++    void set_moving(bool moving);
++    // A key pressed while this entry has focus, as an RmlUi key identifier; returns whether it was used (and
++    // then goes no further: no focus change, no menu action).
++    void set_mod_key_callback(std::function<bool(uint32_t, int)> callback);
+ protected:
+     virtual void process_event(const Event &e) override;
++    bool handle_navigation_event(Rml::Event &event) override;
+     std::string_view get_type_name() override { return "ModEntryButton"; }
+ private:
+     uint32_t mod_index = 0;
+     ModEntryView *view = nullptr;
+     std::function<void(uint32_t)> selected_callback = nullptr;
+     std::function<void(uint32_t, EventDrag)> drag_callback = nullptr;
++    std::function<bool(uint32_t, int)> key_callback = nullptr;
+ };
+ 
+ class ModEntrySpacer : public Element {
+@@ -88,6 +97,11 @@ private:
+     void mod_toggled(bool enabled);
+     void mod_selected(uint32_t mod_index);
+     void mod_dragged(uint32_t mod_index, EventDrag drag);
++    // Controller reordering (PS5, no pointer to drag with): pick up, move, put down.
++    bool mod_key_pressed(uint32_t mod_index, int rml_key);
++    void move_mod(uint32_t from_index, uint32_t to_index);
++    void set_moving_mod(int32_t mod_index);
++    void render_order_notice();
+     void mod_configure_requested();
+     bool handle_special_config_options(const recomp::config::ConfigOption& option, const recomp::config::ConfigValueVariant& config_value);
+     void mod_enum_option_changed(const std::string &id, uint32_t value);
+@@ -106,6 +120,11 @@ private:
+     Button *install_mods_button = nullptr;
+     IconButton *refresh_button = nullptr;
+     Button *mods_folder_button = nullptr;
++    // The list's order notice and the picked-up entry (-1 for none).
++    Container *order_notice = nullptr;
++    Container *order_notice_idle = nullptr;
++    Container *order_notice_moving = nullptr;
++    int32_t moving_mod_index = -1;
+     int32_t active_mod_index = -1;
+     std::vector<ModEntryButton *> mod_entry_buttons;
+     std::vector<ModEntrySpacer *> mod_entry_spacers;
 diff --git a/recompui/src/config/ui_config.cpp b/recompui/src/config/ui_config.cpp
 index 5395aee..51e4175 100644
 --- a/recompui/src/config/ui_config.cpp

@@ -1,8 +1,57 @@
+diff --git a/conker.toml b/conker.toml
+index decf772..0d539d9 100644
+--- a/conker.toml
++++ b/conker.toml
+@@ -465,6 +465,36 @@ func = "func_151D6418"
+ before_vram = 0x151D66E8
+ text = "{ extern void conker_frame_copy_end(uint8_t*, recomp_context*); conker_frame_copy_end(rdram, ctx); }"
+ 
++# PS5: the pause background isn't blurred. The game blurs its saved copy of the frame on the CPU, in
++# RDRAM (func_151D61B0, in each of the first four paused frames), which makes RT64 drop its own copy
++# (full resolution, the widened frame) for the N64's (low resolution, 4:3): the picture jumped from
++# one to the other as the game paused. Without the blur RT64 keeps its copy, drawn across the whole
++# width, and nothing is zoomed (host/src/widescreen.cpp).
++[[patches.hook]]
++func = "func_151D61B0"
++before_vram = 0x151D61B0
++text = "{ extern int conker_pause_blur_skipped(void); if (conker_pause_blur_skipped()) { return; } }"
++
++# Skip Intro (General tab, host/src/skips.cpp): CBFD's mod of that name built in. At the return of the
++# logos' frame (func_151DE6D4) the bar is asked for instead of the chainsaw opening; at the return of a
++# scene's load (func_15007A70), once the bar is in, what the opening's end leaves is set.
++[[patches.hook]]
++func = "func_151DE6D4"
++before_vram = 0x151DE7CC
++text = "{ extern void conker_skip_intro_after_logos_frame(uint8_t*, recomp_context*); conker_skip_intro_after_logos_frame(rdram, ctx); }"
++
++[[patches.hook]]
++func = "func_15007A70"
++before_vram = 0x15007B34
++text = "{ extern void conker_skip_intro_after_scene_load(uint8_t*, recomp_context*); conker_skip_intro_after_scene_load(rdram, ctx); }"
++
++# Skip Any Cutscene (General tab, host/src/skips.cpp): CBFD's mod of that name built in. At its start,
++# func_1501E05C (whether the cutscene is skipped this frame) is answered without its conditions.
++[[patches.hook]]
++func = "func_1501E05C"
++before_vram = 0x1501E05C
++text = "{ extern int conker_skip_any_cutscene(uint8_t*, recomp_context*); if (conker_skip_any_cutscene(rdram, ctx)) { return; } }"
++
+ # Graphics: Conker's Detail: each game frame func_1502C6E8 picks every object's model by how far
+ # it is from the camera; at 0x1502C92C the level is picked ($v1) and not yet compared with the
+ # object's last, and Conker's is set to 0, his most detailed (host/src/model_detail.cpp).
 diff --git a/host/CMakeLists.txt b/host/CMakeLists.txt
-index abfe53e..fa10d15 100644
+index abfe53e..89550d1 100644
 --- a/host/CMakeLists.txt
 +++ b/host/CMakeLists.txt
-@@ -116,6 +116,7 @@ if (CONKER_RT64)
+@@ -86,6 +86,7 @@ add_executable(ConkerRecomp
+     src/mod_api.cpp
+     src/rom_versions.cpp
+     src/widescreen.cpp
++    src/skips.cpp
+     src/cutscene_aspect.cpp
+     src/field_of_view.cpp
+     src/interpolation.cpp
+@@ -116,6 +117,7 @@ if (CONKER_RT64)
          # On macOS it renders with Metal into the window's CAMetalLayer.
          set(RT64_SDL_WINDOW_VULKAN ON CACHE BOOL "" FORCE)
          add_compile_definitions(PLUME_SDL_VULKAN_ENABLED RT64_SDL_WINDOW_VULKAN)
@@ -10,7 +59,7 @@ index abfe53e..fa10d15 100644
          # The file dialogs (Load ROM, mods) ask the desktop for its own through
          # xdg-desktop-portal (D-Bus) instead of opening a GTK one in the game: GTK
          # crashed building its dialog, which the launcher opens from its own thread,
-@@ -128,6 +129,11 @@ if (CONKER_RT64)
+@@ -128,6 +130,11 @@ if (CONKER_RT64)
      # remappable input (recompinput). tools/RecompFrontend is an untracked checkout.
      if (WIN32)
          set(sdl2_SOURCE_DIR "${RT64_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3")
@@ -22,7 +71,7 @@ index abfe53e..fa10d15 100644
      else()
          # The system SDL2; RecompFrontend takes its headers from SDL2_INCLUDE_DIRS.
          find_package(SDL2 REQUIRED)
-@@ -201,13 +207,22 @@ if (CONKER_RT64)
+@@ -201,13 +208,22 @@ if (CONKER_RT64)
      endif()
  endif()
  
@@ -47,7 +96,7 @@ index abfe53e..fa10d15 100644
      target_link_options(ConkerRecomp PRIVATE -rdynamic)
  elseif (WIN32)
 diff --git a/host/src/conker.hpp b/host/src/conker.hpp
-index 478a9a0..1221892 100644
+index 478a9a0..c0a19dc 100644
 --- a/host/src/conker.hpp
 +++ b/host/src/conker.hpp
 @@ -60,6 +60,18 @@ namespace conker {
@@ -69,8 +118,20 @@ index 478a9a0..1221892 100644
      // main.cpp: the device info for whichever input backend is active.
      ultramodern::input::connected_device_info_t get_connected_device_info(int controller_num);
  
+@@ -126,6 +138,11 @@ namespace conker {
+         void update();
+     }
+ 
++    // skips.cpp: Skip Cutscenes (General tab), CBFD's Skip Intro and Skip Any Cutscene mods built in.
++    namespace skips {
++        void add_options(recomp::config::Config& config);
++    }
++
+     // conker_config.cpp: the settings tabs.
+     void init_config();
+ 
 diff --git a/host/src/conker_config.cpp b/host/src/conker_config.cpp
-index d824089..f2c1411 100644
+index d824089..1a1c782 100644
 --- a/host/src/conker_config.cpp
 +++ b/host/src/conker_config.cpp
 @@ -56,7 +56,13 @@ namespace {
@@ -88,8 +149,23 @@ index d824089..f2c1411 100644
  
          static const std::vector<recomp::config::ConfigOptionEnumOption> border_choices = {
              {OverscanBorders::Hidden, "Hidden", "Hidden"},
-@@ -169,6 +175,11 @@ void conker::init_config() {
-     conker::rumble::add_options(recompui::config::create_general_tab(general_options));
+@@ -133,7 +139,7 @@ namespace {
+         set_game_input_description(GameInput::A, "Jumps (press again in the air to hover with the tail), and confirms in menus.");
+         set_game_input_description(GameInput::B, "Context-sensitive action: attack with the current weapon, or use a B pad.");
+         set_game_input_description(GameInput::Z, "Crouches.");
+-        set_game_input_description(GameInput::L, "Unused in the main game. Mods may use it.");
++        set_game_input_description(GameInput::L, "Skips a cutscene you've seen before (any cutscene, with Skip Cutscenes set to All in General).");
+         set_game_input_description(GameInput::R, "Centers the camera behind Conker.");
+         set_game_input_description(GameInput::START, "Pauses the game and skips some cutscenes.");
+         set_game_input_description(GameInput::C_UP, "Enters first-person view.");
+@@ -166,9 +172,16 @@ void conker::init_config() {
+     general_options.has_rumble_strength = false;
+     general_options.has_gyro_sensitivity = false;
+     general_options.has_mouse_sensitivity = false;
+-    conker::rumble::add_options(recompui::config::create_general_tab(general_options));
++    recomp::config::Config& general_config = recompui::config::create_general_tab(general_options);
++    conker::rumble::add_options(general_config);
++    conker::skips::add_options(general_config);
      conker::look_aim::add_camera_options(recompui::config::create_config_tab("Camera", camera_tab_id, false));
      conker::look_aim::add_mouse_gyro_options(recompui::config::create_config_tab("Mouse & Gyro", mouse_gyro_tab_id, false));
 +#if defined(__PROSPERO__)
@@ -100,7 +176,7 @@ index d824089..f2c1411 100644
  
      recomp::config::Config& graphics_config = recompui::config::create_graphics_tab();
      add_graphics_options(graphics_config);
-@@ -226,6 +237,10 @@ bool conker::model_detail::always_highest() {
+@@ -226,6 +239,10 @@ bool conker::model_detail::always_highest() {
  }
  
  bool conker::fps_counter::enabled() {
@@ -552,6 +628,210 @@ index e834831..4a429f7 100644
  }
  
  void conker::rumble::set(int port, bool on) {
+diff --git a/host/src/skips.cpp b/host/src/skips.cpp
+new file mode 100644
+index 0000000..dfdef81
+--- /dev/null
++++ b/host/src/skips.cpp
+@@ -0,0 +1,198 @@
++// Skip Cutscenes, a setting on the General tab (Off by default; Intro Only; All), called from hooks in
++// conker.toml: CBFD-Recompiled's Skip Intro and Skip Any Cutscene mods (mods/skip_intro, mods/skip_cutscenes),
++// built in, so a console player needn't find and install them. Either mod, when installed and on, is left to
++// do its own work instead: its part of the setting does nothing then.
++
++#include <cstdint>
++#include <exception>
++#include <string>
++#include <variant>
++#include <vector>
++
++#include "recomp.h"
++#include "librecomp/mods.hpp"
++
++#include "conker.hpp"
++
++#if defined(CONKER_RT64)
++#include "recompui/config.h"
++#endif
++
++extern "C" void func_1501C730(uint8_t* rdram, recomp_context* ctx);
++
++namespace {
++    const std::string skip_cutscenes_id = "skip_cutscenes";
++    enum class SkipCutscenes : uint32_t { Off, IntroOnly, All };
++
++    gpr address(uint32_t vram) {
++        return (gpr)(int32_t)vram;
++    }
++
++    // The setting: Off without the settings (--headless makes no menus).
++    SkipCutscenes setting() {
++#if defined(CONKER_RT64)
++        try {
++            const auto value = recompui::config::get_general_config().get_option_value(skip_cutscenes_id);
++            return static_cast<SkipCutscenes>(std::get<uint32_t>(value));
++        }
++        catch (const std::exception&) {
++            return SkipCutscenes::Off;
++        }
++#else
++        return SkipCutscenes::Off;
++#endif
++    }
++
++    // Intro Only and All skip the intro, All any cutscene too; not while the mod that does it is on.
++    bool skip_intro_on() {
++        return setting() != SkipCutscenes::Off && !recomp::mods::is_mod_enabled("conker_skip_intro");
++    }
++
++    bool skip_any_cutscene_on() {
++        return setting() == SkipCutscenes::All && !recomp::mods::is_mod_enabled("conker_skip_any_cutscene");
++    }
++}
++
++#if defined(CONKER_RT64)
++void conker::skips::add_options(recomp::config::Config& config) {
++    static const std::vector<recomp::config::ConfigOptionEnumOption> choices = {
++        {SkipCutscenes::Off, "Off", "Off"},
++        {SkipCutscenes::IntroOnly, "IntroOnly", "Intro Only"},
++        {SkipCutscenes::All, "All", "All"},
++    };
++    config.add_enum_option(skip_cutscenes_id, "Skip Cutscenes",
++        "<recomp-color primary>Off</recomp-color>: as the game was, where L1 only skips a cutscene you've seen before. "
++        "<recomp-color primary>Intro Only</recomp-color>: the game starts at the bar, a button press from the main "
++        "menu, without the notices, the logos and the chainsaw opening (from the next start). "
++        "<recomp-color primary>All</recomp-color>: that, and L1 skips any cutscene, even the first time it plays and "
++        "the ones the game never lets you skip, such as the opening in the throne room.",
++        choices, SkipCutscenes::Off);
++}
++#endif
++
++// Skip Intro (mods/skip_intro/src/skip_intro.c, which has the details). The game boots through the logos
++// (scene 0x25), the chainsaw opening (0x21) and the bar (0x1D), where Conker walks in before the menu. A few
++// frames into the logos, the bar is asked for instead of the opening; once it has loaded, what the opening's
++// end leaves behind is set. Once per start of the game, as in the mod: a soft reset plays the boot again.
++namespace {
++    constexpr uint32_t scene_bar = 0x1D;
++    // The logos' frame count at which the bar is asked for (the game asks for the opening at 0x349). On the
++    // first two frames the request never completes, so a little later (the mod's measurement).
++    constexpr int32_t arm_frames = 10;
++
++    constexpr uint32_t logo_frames = 0x800E0A90;   // s32
++    constexpr uint32_t scene_in_play = 0x800BE9F0; // s32
++    constexpr uint32_t boot_phase = 0x800E0B94;    // u8
++    constexpr uint32_t D_800D2E40 = 0x800D2E40;    // u8
++    constexpr uint32_t D_800E0B96 = 0x800E0B96;    // u8
++    constexpr uint32_t D_8008FD80 = 0x8008FD80;    // u8
++    constexpr uint32_t D_8008FDA4 = 0x8008FDA4;    // u8
++    constexpr uint32_t D_8008FE28 = 0x8008FE28;    // u8
++    constexpr uint32_t game_state = 0x8008FDD4;    // u8*
++
++    bool bar_requested = false;
++    bool bar_set_up = false;
++}
++
++// func_151DE6D4 (the logos, each frame), at its return.
++extern "C" void conker_skip_intro_after_logos_frame(uint8_t* rdram, recomp_context* ctx) {
++    if (bar_requested || (int32_t)MEM_W(0, address(logo_frames)) < arm_frames) {
++        return;
++    }
++    if (!skip_intro_on()) {
++        return;
++    }
++    bar_requested = true;
++    MEM_B(0, address(D_8008FE28)) = 2;
++    MEM_B(0, address(boot_phase)) = 1;
++    MEM_B(0, address(D_800D2E40)) = 0;
++
++    // func_1501C730(6, the bar, 0, 0, 1): the fifth argument on the stack. Its own context and a stack of
++    // its own below this function's, so this function returns to its caller as it would have.
++    recomp_context call = *ctx;
++    call.r29 = ADD32(ctx->r29, -0x40);
++    MEM_W(0x10, call.r29) = 1;
++    call.r4 = 6;
++    call.r5 = scene_bar;
++    call.r6 = 0;
++    call.r7 = 0;
++    func_1501C730(rdram, &call);
++
++    MEM_B(0, address(D_800E0B96)) = (int8_t)0xFF;
++}
++
++// func_15007A70 (a scene's load), at its return.
++extern "C" void conker_skip_intro_after_scene_load(uint8_t* rdram, recomp_context* ctx) {
++    (void)ctx;
++    if (!bar_requested || bar_set_up || (uint32_t)MEM_W(0, address(scene_in_play)) != scene_bar) {
++        return;
++    }
++    bar_set_up = true;
++    MEM_B(0, address(D_800D2E40)) = 0;
++    MEM_B(0, address(boot_phase)) = 3;
++    MEM_B(0, address(D_8008FD80)) = 1;
++    MEM_B(0, address(D_8008FE28)) = 2;
++    MEM_B(0, address(D_8008FDA4)) = 0;
++    const gpr state = (gpr)(int32_t)MEM_W(0, address(game_state));
++    if (state != 0) {
++        MEM_B(0x3E, state) = 0;
++        MEM_B(0x2B, state) = 5;
++        MEM_B(0x2C, state) = MEM_B(0x2B, state);
++    }
++}
++
++// Skip Any Cutscene (mods/skip_cutscenes/src/skip_cutscenes.c). func_1501E05C decides each frame whether the
++// playing cutscene is skipped: with L, but only one watched before; the opening (scene 0x21) with Start, but
++// only after a soft reset; and never one its script marks unskippable. With the setting on, this answers in
++// its place, without those three conditions, as the mod's patch of it does (with its Skip Unskippable
++// Cutscenes option on, the mod's default). At the function's start: $a0 is the cutscene's slot; returns
++// whether it answered, the answer in $v0.
++namespace {
++    constexpr uint16_t button_start = 0x1000;
++    constexpr uint16_t button_l = 0x0020;
++
++    constexpr uint32_t buttons_pressed = 0x800BE710;  // u16
++    constexpr uint32_t scene_1D_skip = 0x8008FD84;    // s8
++    constexpr uint32_t cutscene_ids = 0x800C35E8;     // u8[]
++    constexpr uint32_t cutscene_timers = 0x800C35B0;  // s32[]
++    constexpr uint32_t cutscene_lengths = 0x800C3640; // s32[]
++    constexpr uint32_t always_skippable = 0x800D2E40; // u8
++    constexpr uint32_t skip_anywhere = 0x800C3C99;    // u8
++
++    int32_t skip_any_cutscene(uint8_t* rdram, int32_t i) {
++        const int32_t scene = (int32_t)MEM_W(0, address(scene_in_play));
++        const uint16_t buttons = (uint16_t)MEM_HU(0, address(buttons_pressed));
++
++        if (scene == 0x1D) {
++            if (MEM_B(0, address(scene_1D_skip)) != 0) {
++                MEM_B(0, address(scene_1D_skip)) = 0;
++                return 1;
++            }
++            if (MEM_BU(0, address(cutscene_ids)) != 5) {
++                return 0;
++            }
++        }
++
++        if (scene == 0x21) {
++            return ((buttons & button_start) != 0) && ((int32_t)MEM_W(0, address(cutscene_timers)) >= 0x12D);
++        }
++
++        if ((buttons & button_l) == 0) {
++            return 0;
++        }
++        if (MEM_BU(0, address(always_skippable)) != 0 || MEM_BU(0, address(skip_anywhere)) != 0) {
++            return 1;
++        }
++        const int32_t timer = (int32_t)MEM_W(i * 4, address(cutscene_timers));
++        const int32_t length = (int32_t)MEM_W(i * 4, address(cutscene_lengths));
++        return (timer + 0x1E < length) ? 1 : 0;
++    }
++}
++
++extern "C" int conker_skip_any_cutscene(uint8_t* rdram, recomp_context* ctx) {
++    if (!skip_any_cutscene_on()) {
++        return 0;
++    }
++    ctx->r2 = (gpr)skip_any_cutscene(rdram, (int32_t)ctx->r4);
++    return 1;
++}
 diff --git a/host/src/texture_packs.cpp b/host/src/texture_packs.cpp
 index f3342f7..0a21287 100644
 --- a/host/src/texture_packs.cpp
@@ -582,6 +862,55 @@ index f3342f7..0a21287 100644
      config.add_option_change_callback(option_id,
          [](recomp::config::ConfigValueVariant, recomp::config::ConfigValueVariant, recomp::config::OptionChangeContext context) {
              // Once applied: the Graphics tab keeps a choice as temporary until its Apply button
+diff --git a/host/src/widescreen.cpp b/host/src/widescreen.cpp
+index c11037f..364043e 100644
+--- a/host/src/widescreen.cpp
++++ b/host/src/widescreen.cpp
+@@ -268,6 +268,20 @@ extern "C" void conker_bubble_begin(uint8_t* rdram, recomp_context* ctx) {
+     }
+ }
+ 
++// func_151D61B0, at its start: the pause background's blur, run by the CPU over the saved copy of the
++// frame in RDRAM in each of the first four paused frames (a horizontal blend of each pixel with its
++// neighbours). It changes most of the copy, so RT64 discards its own (the widened frame, at full
++// resolution) and draws the N64's from then on: on a widescreen 4K picture, the background jumped
++// from the sharp copy to a blurred, low-resolution 4:3 one a frame later. The PS5 skips it: the pause
++// background is the frame as it was, sharp and across the width.
++extern "C" int conker_pause_blur_skipped(void) {
++#if defined(__PROSPERO__)
++    return 1;
++#else
++    return 0;
++#endif
++}
++
+ // At its return: $v0 is the end of what it wrote.
+ extern "C" void conker_bubble_end(uint8_t* rdram, recomp_context* ctx) {
+     const gpr start = bubble_dl_start;
+@@ -319,6 +333,11 @@ extern "C" void conker_bubble_end(uint8_t* rdram, recomp_context* ctx) {
+ // frame, then copies the frame into it. That copy is RT64's widened frame and is drawn back
+ // across the whole width already, and zooming it each frame zoomed the last frame's ghost
+ // again on every pass, dragging the picture into streaks.
++//
++// PS5: none of this. The 4:3 copy is the game's CPU blur's doing (conker_pause_blur_skipped): it
++// rewrites the copy in RDRAM, so RT64 drops its own copy, the widened frame at full resolution, for
++// the N64's. The PS5 skips the blur, so the copy stays RT64's and spans the width without a zoom, as
++// the motion blur's does: pausing freezes the picture as it was.
+ namespace {
+     constexpr uint32_t motion_blur_copy = 0x800BE570; // D_800BE570
+     constexpr uint32_t g_ex_setrectaspect_v1 = 0x000033;
+@@ -347,6 +366,11 @@ extern "C" void conker_motion_blur(uint8_t* rdram, recomp_context* ctx) {
+ // At the start of the function: $a0 is where it writes its first command, $a1 the image it
+ // draws from.
+ extern "C" void conker_frame_copy_begin(uint8_t* rdram, recomp_context* ctx) {
++#if defined(__PROSPERO__)
++    // The copy is RT64's, already across the width: nothing to zoom (conker_pause_blur_skipped).
++    frame_copy_dl_start = 0;
++    return;
++#endif
+     frame_copy_dl_start = ctx->r4;
+     const uint32_t blur_copy = (uint32_t)MEM_W(0, (gpr)(int32_t)motion_blur_copy);
+     if (blur_copy == 0) {
 diff --git a/tools/texture_packs/gliden64_to_rt64.py b/tools/texture_packs/gliden64_to_rt64.py
 index 9ae4dde..6dde581 100644
 --- a/tools/texture_packs/gliden64_to_rt64.py
